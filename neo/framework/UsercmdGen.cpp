@@ -31,6 +31,263 @@ If you have questions concerning this license or the applicable additional terms
 
 #include "Session_local.h"
 
+#include <XnOS.h>
+#include <XnCppWrapper.h>
+
+enum ShootStatus {
+   SHOOTING_IDLE,
+   SHOOTING_DOIT,
+   SHOOTING_DONE
+};
+
+// A pointer to this struct is passed as the "cookie" argument to the CB functions.
+struct HandTrackingCallbackArgs
+{
+   HandTrackingCallbackArgs() : gesture_gen(NULL), hands_gen(NULL) { }
+
+   xn::GestureGenerator* gesture_gen;
+   xn::HandsGenerator* hands_gen;
+
+   int* continuousMouseX;
+   int* continuousMouseY;
+   int* mouseDx;
+   int* mouseDy;
+   ShootStatus* shoot;
+
+private:
+   HandTrackingCallbackArgs(const HandTrackingCallbackArgs&);
+   HandTrackingCallbackArgs& operator=(const HandTrackingCallbackArgs&);
+};
+
+void XN_CALLBACK_TYPE GestureRecognizedCB(xn::GestureGenerator& gen,
+   const XnChar* gesture,
+   const XnPoint3D* idPos,
+   const XnPoint3D* endPos,
+   void* cookie)
+{
+   HandTrackingCallbackArgs* args = static_cast<HandTrackingCallbackArgs*>(cookie);
+
+   // Windows-only debug feature.
+   // Gives a feedback sound when a gesture was recognized.
+   // Good enough since there is nothing better atm (like console output).
+   MessageBeep(MB_OK);
+
+   if (strcmp(gesture, "Click") == 0)
+   {
+      // FIXME: This is crap. Works only 30-60% of the time.
+      //  Probably a race condition?
+      *(args->shoot) = SHOOTING_DOIT;
+   }
+
+   if (strcmp(gesture, "Wave") == 0)
+   {
+      args->gesture_gen->RemoveGesture(gesture);
+      args->hands_gen->StartTracking(*endPos);
+   }
+}
+
+void XN_CALLBACK_TYPE GestureProcessCB(xn::GestureGenerator& gen,
+   const XnChar* gesture,
+   const XnPoint3D* pos,
+   XnFloat progress,
+   void* cookie)
+{
+
+}
+
+void XN_CALLBACK_TYPE HandCreateCB(xn::HandsGenerator& gen,
+   XnUserID id,
+   const XnPoint3D* pos,
+   XnFloat time,
+   void* cookie)
+{
+
+}
+
+void XN_CALLBACK_TYPE HandUpdateCB(xn::HandsGenerator& gen,
+   XnUserID id,
+   const XnPoint3D* pos,
+   XnFloat time,
+   void* cookie)
+{
+   HandTrackingCallbackArgs* args = static_cast<HandTrackingCallbackArgs*>(cookie);
+
+   *(args->continuousMouseX) += (pos->X / 4.f);
+   *(args->mouseDx) += (pos->X / 4.f);
+
+   *(args->continuousMouseY) -= (pos->Y / 5.f);
+   *(args->mouseDy) -= (pos->Y / 5.f);
+}
+
+void XN_CALLBACK_TYPE HandDestroyCB(xn::HandsGenerator& gen,
+   XnUserID id,
+   XnFloat time,
+   void* cookie)
+{
+   HandTrackingCallbackArgs* args = static_cast<HandTrackingCallbackArgs*>(cookie);
+   args->gesture_gen->AddGesture("Wave", NULL);
+}
+
+class HandTracking
+{
+public:
+   HandTracking()
+   {
+
+   }
+   ~HandTracking()
+   {
+      Shutdown();
+   }
+
+   void Init(xn::Context& ctx,
+             int* continuousMouseX,
+             int* continuousMouseY,
+             int* mouseDx,
+             int* mouseDy,
+             ShootStatus* shoot)
+   {
+      XnStatus rc = XN_STATUS_OK;
+
+      if (XN_STATUS_OK != mGestureGen.Create(ctx)) {
+         throw "xn::GestureGenerator could not be inizialized. Does the context support it?";
+      }
+
+      if (XN_STATUS_OK != mHandsGen.Create(ctx)) {
+         throw "xn::HandsGenerator could not be inizialized. Does the context support it?";
+      }
+
+      mCallbackArgs.gesture_gen = &mGestureGen;
+      mCallbackArgs.hands_gen = &mHandsGen;
+      mCallbackArgs.continuousMouseX = continuousMouseX;
+      mCallbackArgs.continuousMouseY = continuousMouseY;
+      mCallbackArgs.mouseDx = mouseDx;
+      mCallbackArgs.mouseDy = mouseDy;
+      mCallbackArgs.shoot = shoot;
+
+      mGestureGen.RegisterGestureCallbacks(GestureRecognizedCB, GestureProcessCB, &mCallbackArgs, mGestureCB);
+      mHandsGen.RegisterHandCallbacks(HandCreateCB, HandUpdateCB, HandDestroyCB, &mCallbackArgs, mHandCB);
+
+      rc = mGestureGen.AddGesture("Wave", NULL);
+      assert(XN_STATUS_OK == rc);
+      rc = mGestureGen.AddGesture("Click", NULL);
+      assert(XN_STATUS_OK == rc);
+      //rc = mGestureGen.AddGesture("MovingHand", NULL);
+      //assert(XN_STATUS_OK == rc);
+   }
+   void Shutdown()
+   {
+
+   }
+
+private:
+   xn::GestureGenerator mGestureGen;
+   xn::HandsGenerator mHandsGen;
+
+   XnCallbackHandle mGestureCB;
+   XnCallbackHandle mHandCB;
+
+   HandTrackingCallbackArgs mCallbackArgs;
+
+   // Stuff we do not need atm.
+   HandTracking(const HandTracking&);
+   HandTracking& operator=(const HandTracking&);
+};
+
+class KinectWrapper
+{
+public:
+   KinectWrapper()
+   {
+
+   }
+   virtual ~KinectWrapper()
+   {
+      Shutdown();
+   }
+
+   void Init(int* continuousMouseX,
+             int* continuousMouseY,
+             int* mouseDx,
+             int* mouseDy,
+             ShootStatus* shoot)
+   {
+      Shutdown();
+
+      InitOpenNI();
+      //mUserTracking.Init(mContext);
+      mHandTracking.Init(mContext,
+                         continuousMouseX,
+                         continuousMouseY,
+                         mouseDx,
+                         mouseDy,
+                         shoot);
+      mContext.StartGeneratingAll();
+   }
+   void Shutdown()
+   {
+      //mUserTracking.Shutdown();
+      mHandTracking.Shutdown();
+      mContext.Shutdown();
+   }
+
+   void Update()
+   {
+      // Read a new frame from the recording.
+      const XnStatus rc = mContext.WaitNoneUpdateAll();
+      if (XN_STATUS_OK != rc) {
+         throw "xn::Context::WaitNoneUpdateAll() failed";
+      }
+   }
+
+private:
+   void InitOpenNI()
+   {
+      // TODO: Better (actual!) error handling for OpenNI API failures.
+
+      XnStatus rc = mContext.Init();
+      assert(XN_STATUS_OK == rc);
+
+      rc = mContext.SetGlobalMirror(true);
+      assert(XN_STATUS_OK == rc);
+
+      rc = mDepthGen.Create(mContext);
+      assert(XN_STATUS_OK == rc);
+      rc = mImageGen.Create(mContext);
+      assert(XN_STATUS_OK == rc);
+
+      mDepthGen.GetMetaData(mDepthGenMD);
+      mImageGen.GetMetaData(mImageGenMD);
+
+      // Image and Depth must have the same resolution for this tool.
+      if (mDepthGenMD.FullXRes() != mImageGenMD.FullXRes() ||
+          mDepthGenMD.FullYRes() != mImageGenMD.FullYRes()){
+            throw "Image and Depth do not have the same resolution.";
+      }
+
+      // The pixel format of the image recording and SDL_Surface must be the same.
+      // FYI: depthmap usually returns XN_PIXEL_FORMAT_GRAYSCALE_16_BIT.
+      if (XN_PIXEL_FORMAT_RGB24 != mImageGenMD.PixelFormat()) {
+         throw "Currently 24bit RGB is the only supported format.";
+      }
+   }
+
+   // OpenNI members
+   xn::Context mContext;
+   xn::DepthGenerator mDepthGen;
+   xn::ImageGenerator mImageGen;
+   xn::DepthMetaData mDepthGenMD;
+   xn::ImageMetaData mImageGenMD;
+
+   //UserTracking mUserTracking;
+   HandTracking mHandTracking;
+
+   // Stuff we do not need atm.
+   KinectWrapper(const KinectWrapper&);
+   KinectWrapper& operator=(const KinectWrapper&);
+};
+
+
 /*
 ================
 usercmd_t::ByteSwap
@@ -351,6 +608,7 @@ private:
 	void			CmdButtons( void );
 
 	void			Mouse( void );
+   void			Hand( void );
 	void			Keyboard( void );
 	void			Joystick( void );
 
@@ -381,6 +639,9 @@ private:
 
 	int				mouseDx, mouseDy;	// added to by mouse events
 	int				joystickAxis[MAX_JOYSTICK_AXIS];	// set by joystick events
+
+   KinectWrapper kinect;
+   ShootStatus shootStatus;
 
 	static idCVar	in_yawSpeed;
 	static idCVar	in_pitchSpeed;
@@ -834,6 +1095,12 @@ idUsercmdGenLocal::Init
 ================
 */
 void idUsercmdGenLocal::Init( void ) {
+   kinect.Init(&continuousMouseX,
+               &continuousMouseY,
+               &mouseDx,
+               &mouseDy,
+               &shootStatus);
+
 	initialized = true;
 }
 
@@ -861,6 +1128,8 @@ idUsercmdGenLocal::Shutdown
 ================
 */
 void idUsercmdGenLocal::Shutdown( void ) {
+   kinect.Shutdown();
+
 	initialized = false;
 }
 
@@ -879,6 +1148,8 @@ void idUsercmdGenLocal::Clear( void ) {
 	mouseDx = mouseDy = 0;
 	mouseButton = 0;
 	mouseDown = false;
+
+   shootStatus = SHOOTING_IDLE;
 }
 
 /*
@@ -1004,6 +1275,20 @@ void idUsercmdGenLocal::Mouse( void ) {
 	Sys_EndMouseInputEvents();
 }
 
+void idUsercmdGenLocal::Hand( void ) {
+   kinect.Update();
+
+   // FIXME: This is crap. Works only 30-60% of the time.
+   //  Probably a race condition?
+   if ( shootStatus == SHOOTING_DOIT ) {
+      shootStatus = SHOOTING_DONE;
+      Key( K_MOUSE1, true );
+   } else if (shootStatus == SHOOTING_DONE) {
+      shootStatus = SHOOTING_IDLE;
+      Key( K_MOUSE1, false );
+   }
+}
+
 /*
 ===============
 idUsercmdGenLocal::Keyboard
@@ -1096,6 +1381,8 @@ usercmd_t idUsercmdGenLocal::GetDirectUsercmd( void ) {
 
 	// process the system mouse events
 	Mouse();
+
+   Hand();
 
 	// process the system keyboard events
 	Keyboard();
